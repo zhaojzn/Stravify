@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { config } from "../config";
 import { fmtDate, fmtDuration, fmtKm } from "../lib/api";
 import { PieChart } from "../components/PieChart";
+import { PaceChart } from "../components/PaceChart";
 
 interface Track {
   trackId: string;
@@ -22,6 +23,7 @@ interface RunDetail {
   musicSource?: "lastfm" | "spotify";
   tracks: Track[];
   genreBreakdown: GenreBreakdown[];
+  streams?: { time: number[]; distance: number[]; velocity: number[] };
 }
 
 export function RunDetail() {
@@ -82,6 +84,23 @@ export function RunDetail() {
           </div>
         </header>
 
+        {run.streams && run.streams.time?.length > 1 && (
+          <section className="mt-2 mb-8 sm:mb-12">
+            <h2 className="text-base font-semibold mb-4 sm:mb-5">Pace + music</h2>
+            <div className="bg-card border border-line rounded-md p-4 sm:p-6">
+              <PaceChart
+                startTime={run.startTime}
+                elapsedSeconds={run.elapsedSeconds}
+                streams={run.streams}
+                tracks={run.tracks}
+              />
+              <div className="mt-3 text-xs text-muted">
+                Faster pace is higher on the chart. Hover a dot to see which track started playing at that moment.
+              </div>
+            </div>
+          </section>
+        )}
+
         {run.genreBreakdown.length > 0 && (
           <section className="mt-2 mb-8 sm:mb-12">
             <h2 className="text-base font-semibold mb-4 sm:mb-5">Genre mix</h2>
@@ -121,7 +140,7 @@ export function RunDetail() {
 
         <footer className="mt-12 text-xs text-dim flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <span>
-            Built on Stravify — <Link to="/" className="text-brand hover:underline">stravify.net</Link>
+            Built by Jason Zhao — <Link to="/" className="text-brand hover:underline">stravify.net</Link>
           </span>
           <div className="flex items-center gap-4">
             <a

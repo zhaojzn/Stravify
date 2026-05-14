@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { getValidTokens, signOut, getStoredEmail } from "../lib/auth";
+import { getValidTokens, signOut, getStoredEmail, changePassword, deleteCognitoUser } from "../lib/auth";
 import { api, fmtDate, fmtDuration, fmtKm } from "../lib/api";
 
-type Tab = "runs" | "top-tracks" | "connected";
+type Tab = "runs" | "top-tracks" | "connected" | "profile";
 
 interface Me {
   email?: string;
+  createdAt?: string;
   stravaLinked: boolean; stravaAthleteName?: string;
   spotifyLinked: boolean; spotifyUserName?: string;
   lastfmLinked: boolean; lastfmUsername?: string;
+  autoPublish: boolean;
 }
 interface GenreBreakdown { genre: string; percent: number; trackCount: number }
 interface Activity {
@@ -40,6 +42,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncResult | null>(null);
+  const [linking, setLinking] = useState<"strava" | "spotify" | "lastfm" | null>(null);
 
   async function loadAll() {
     const [m, a, ts] = await Promise.all([
@@ -55,15 +58,39 @@ export function Dashboard() {
       const t = await getValidTokens();
       if (!t) { navigate("/signin"); return; }
       if (params.get("linked")) navigate("/dashboard", { replace: true });
-      try { await loadAll(); }
-      catch (e: any) { setError(e.message); }
+      try {
+        await loadAll();
+      } catch (e: any) { setError(e.message); }
     })();
   }, [navigate, params]);
 
+  // On first load only, if the user hasn't linked Strava yet, default the tab
+  // to Connected accounts. After that, let them navigate freely.
+  const initialJumpDone = useRef(false);
+  useEffect(() => {
+    if (initialJumpDone.current || !me) return;
+    initialJumpDone.current = true;
+    if (!me.stravaLinked) setTab("connected");
+  }, [me]);
+
   async function startOauth(service: "strava" | "spotify" | "lastfm") {
-    const returnTo = encodeURIComponent(window.location.origin);
-    const { url } = await api<{ url: string }>(`/auth/${service}/start?returnTo=${returnTo}`);
-    window.location.href = url;
+    if (linking) return;
+    // Temporary: Strava app is pending review for a higher rate limit, so
+    // new users can't link until Strava approves. Existing linked users can
+    // still relink (their athlete ID is already on the allowlist).
+    if (service === "strava" && !me?.stravaLinked) {
+      alert("This app has not been approved by Strava developers yet — please come back when it's approved.");
+      return;
+    }
+    setLinking(service); setError(null);
+    try {
+      const returnTo = encodeURIComponent(window.location.origin);
+      const { url } = await api<{ url: string }>(`/auth/${service}/start?returnTo=${returnTo}`);
+      window.location.href = url;
+    } catch (e: any) {
+      setError(e.message);
+      setLinking(null);
+    }
   }
 
   async function runSync(force = false) {
@@ -96,6 +123,7 @@ export function Dashboard() {
           <MobileTab active={tab === "runs"} onClick={() => setTab("runs")}>Runs</MobileTab>
           <MobileTab active={tab === "top-tracks"} onClick={() => setTab("top-tracks")}>Top tracks</MobileTab>
           <MobileTab active={tab === "connected"} onClick={() => setTab("connected")}>Accounts</MobileTab>
+          <MobileTab active={tab === "profile"} onClick={() => setTab("profile")}>Profile</MobileTab>
         </nav>
       </div>
 
@@ -110,6 +138,7 @@ export function Dashboard() {
           <SideLink active={tab === "runs"} onClick={() => setTab("runs")}>Runs</SideLink>
           <SideLink active={tab === "top-tracks"} onClick={() => setTab("top-tracks")}>Top tracks</SideLink>
           <SideLink active={tab === "connected"} onClick={() => setTab("connected")}>Connected accounts</SideLink>
+          <SideLink active={tab === "profile"} onClick={() => setTab("profile")}>Profile</SideLink>
         </nav>
         <div className="border-t border-line px-5 pt-4 text-xs text-dim">
           <div className="text-muted mb-1.5 break-all">{me?.email ?? getStoredEmail() ?? "—"}</div>
@@ -126,14 +155,25 @@ export function Dashboard() {
               activities={activities}
               syncing={syncing}
               syncStatus={syncStatus}
-              canSync={!!(me?.stravaLinked && (me?.spotifyLinked || me?.lastfmLinked))}
+              stravaLinked={!!me?.stravaLinked}
+              musicLinked={!!(me?.spotifyLinked || me?.lastfmLinked)}
               onSync={() => runSync(false)}
-              onForceSync={() => runSync(true)}
+              onGoToAccounts={() => setTab("connected")}
             />
           )}
           {tab === "top-tracks" && <TopTracksTab items={topSongs} />}
           {tab === "connected" && (
-            <ConnectedTab me={me} onLink={startOauth} />
+            <ConnectedTab me={me} onLink={startOauth} linking={linking} />
+          )}
+          {tab === "profile" && (
+            <ProfileTab
+              me={me}
+              activitiesCount={activities?.length ?? 0}
+              tracksCount={(topSongs ?? []).reduce((a, t) => a + t.playCount, 0)}
+              onUnlinked={loadAll}
+              onPrefsChanged={loadAll}
+              onAccountDeleted={() => { navigate("/"); }}
+            />
           )}
         </div>
       </main>
@@ -182,15 +222,36 @@ function PageHeader({ title, sub, action }: { title: string; sub?: string; actio
 }
 
 function RunsTab({
-  activities, syncing, syncStatus, canSync, onSync, onForceSync,
+  activities, syncing, syncStatus, stravaLinked, musicLinked, onSync, onGoToAccounts,
 }: {
   activities: Activity[] | null;
   syncing: boolean;
   syncStatus: SyncResult | null;
-  canSync: boolean;
+  stravaLinked: boolean;
+  musicLinked: boolean;
   onSync: () => void;
-  onForceSync: () => void;
+  onGoToAccounts: () => void;
 }) {
+  const canSync = stravaLinked && musicLinked;
+
+  if (!stravaLinked) {
+    return (
+      <>
+        <PageHeader title="Runs" />
+        <div className="bg-card border border-line rounded p-6 text-sm">
+          <div className="text-fg font-medium mb-2">Link your Strava account to get started.</div>
+          <p className="text-muted mb-4">Stravify needs read access to your Strava activities and write access to update the description. You can also link Last.fm now for the best results.</p>
+          <button
+            onClick={onGoToAccounts}
+            className="bg-brand hover:bg-brand-hover text-black font-semibold px-4 py-2 rounded text-sm"
+          >
+            Go to Connected accounts
+          </button>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader
@@ -203,24 +264,14 @@ function RunsTab({
               : `${activities.length} run${activities.length === 1 ? "" : "s"} logged`
         }
         action={
-          <div className="flex items-center gap-3">
-            <button
-              onClick={onForceSync}
-              disabled={!canSync || syncing}
-              className="text-xs text-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Re-process already-annotated runs (useful after improving genre logic)"
-            >
-              Rebuild
-            </button>
-            <button
-              onClick={onSync}
-              disabled={!canSync || syncing}
-              className="bg-brand hover:bg-brand-hover text-black font-semibold px-4 py-2 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              title={canSync ? "Pull recent Strava activities and process them" : "Link Strava and a music source first"}
-            >
-              {syncing ? "Syncing…" : "Sync"}
-            </button>
-          </div>
+          <button
+            onClick={onSync}
+            disabled={!canSync || syncing}
+            className="bg-brand hover:bg-brand-hover text-black font-semibold px-4 py-2 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            title={canSync ? "Pull recent Strava activities and process them" : "Link a music source first"}
+          >
+            {syncing ? "Syncing…" : "Sync"}
+          </button>
         }
       />
 
@@ -393,9 +444,11 @@ function TopTracksTab({ items }: { items: TopSong[] | null }) {
 function ConnectedTab({
   me,
   onLink,
+  linking,
 }: {
   me: Me | null;
   onLink: (s: "strava" | "spotify" | "lastfm") => void;
+  linking: "strava" | "spotify" | "lastfm" | null;
 }) {
   const onlySpotifyLinked = me?.spotifyLinked && !me?.lastfmLinked;
   return (
@@ -420,13 +473,22 @@ function ConnectedTab({
         </div>
       )}
 
+      {me && !me.stravaLinked && (
+        <div className="mb-3 text-xs px-3 py-2 rounded border" style={{ borderColor: "#FC520055", color: "#FC5200" }}>
+          Strava approval pending — new accounts can't link yet. Check back soon.
+        </div>
+      )}
+
       <div className="flex flex-col gap-3">
         <ConnectRow
           label="Strava"
-          subtitle="Reads activities and writes the music description."
+          subtitle="Required. Reads activities and writes the music description."
           linked={!!me?.stravaLinked}
           display={me?.stravaAthleteName}
           onClick={() => onLink("strava")}
+          required
+          busy={linking === "strava"}
+          disabled={linking !== null && linking !== "strava"}
         />
         <ConnectRow
           label="Last.fm"
@@ -435,6 +497,8 @@ function ConnectedTab({
           display={me?.lastfmUsername}
           onClick={() => onLink("lastfm")}
           recommended
+          busy={linking === "lastfm"}
+          disabled={linking !== null && linking !== "lastfm"}
         />
         <ConnectRow
           label="Spotify"
@@ -442,6 +506,8 @@ function ConnectedTab({
           linked={!!me?.spotifyLinked}
           display={me?.spotifyUserName}
           onClick={() => onLink("spotify")}
+          busy={linking === "spotify"}
+          disabled={linking !== null && linking !== "spotify"}
         />
       </div>
     </>
@@ -449,20 +515,37 @@ function ConnectedTab({
 }
 
 function ConnectRow(props: {
-  label: string; subtitle: string; linked: boolean; display?: string; onClick: () => void; recommended?: boolean;
+  label: string; subtitle: string; linked: boolean; display?: string; onClick: () => void;
+  recommended?: boolean; required?: boolean; busy?: boolean; disabled?: boolean;
 }) {
+  const stravaOrange = "#FC5200";
+  const borderStyle = props.required
+    ? { borderColor: stravaOrange }
+    : undefined;
+  const buttonInactive = props.busy || props.disabled;
   return (
     <div
+      style={borderStyle}
       className={
         "flex items-center justify-between rounded px-4 py-4 gap-4 border " +
-        (props.recommended
-          ? "bg-card border-brand/40"
-          : "bg-card border-line")
+        (props.required
+          ? "bg-card"
+          : props.recommended
+            ? "bg-card border-brand/40"
+            : "bg-card border-line")
       }
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <div className="font-semibold text-sm">{props.label}</div>
+          {props.required && (
+            <span
+              style={{ color: stravaOrange, borderColor: stravaOrange }}
+              className="text-[10px] uppercase tracking-wide font-semibold border rounded px-1.5 py-px"
+            >
+              Required
+            </span>
+          )}
           {props.recommended && (
             <span className="text-[10px] uppercase tracking-wide font-semibold text-brand border border-brand/50 rounded px-1.5 py-px">
               Recommended
@@ -470,7 +553,12 @@ function ConnectRow(props: {
           )}
         </div>
         <div className="text-xs text-muted mt-0.5">{props.subtitle}</div>
-        <div className={"text-xs mt-1.5 " + (props.linked ? "text-brand" : "text-dim")}>
+        <div
+          style={props.linked && props.required ? { color: stravaOrange } : undefined}
+          className={"text-xs mt-1.5 " + (props.linked
+            ? (props.required ? "" : "text-brand")
+            : "text-dim")}
+        >
           {props.linked
             ? `Linked${props.display ? ` · ${props.display}` : ""}`
             : "Not linked"}
@@ -478,16 +566,272 @@ function ConnectRow(props: {
       </div>
       <button
         onClick={props.onClick}
+        disabled={buttonInactive}
+        style={props.required && !props.linked ? { backgroundColor: stravaOrange, color: "#fff" } : undefined}
         className={
-          "text-xs font-medium px-3 py-1.5 rounded shrink-0 " +
-          (props.recommended && !props.linked
-            ? "bg-brand hover:bg-brand-hover text-black font-semibold"
-            : "border border-line-strong hover:bg-card-2 hover:border-[#3a3a3a]")
+          "text-xs font-medium px-3 py-1.5 rounded shrink-0 inline-flex items-center gap-1.5 " +
+          (props.required && !props.linked
+            ? "font-semibold hover:brightness-110"
+            : props.recommended && !props.linked
+              ? "bg-brand hover:bg-brand-hover text-black font-semibold"
+              : "border border-line-strong hover:bg-card-2 hover:border-[#3a3a3a]") +
+          (buttonInactive ? " opacity-60 cursor-not-allowed" : "")
         }
       >
-        {props.linked ? "Relink" : "Link"}
+        {props.busy && <Spinner />}
+        {props.busy ? "Linking…" : props.linked ? "Relink" : "Link"}
       </button>
     </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="4" />
+      <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ProfileTab({
+  me, activitiesCount, tracksCount, onUnlinked, onPrefsChanged, onAccountDeleted,
+}: {
+  me: Me | null;
+  activitiesCount: number;
+  tracksCount: number;
+  onUnlinked: () => Promise<void>;
+  onPrefsChanged: () => Promise<void>;
+  onAccountDeleted: () => void;
+}) {
+  return (
+    <>
+      <PageHeader title="Profile" sub="Your account and connected services." />
+      <div className="flex flex-col gap-8">
+        <AccountInfo me={me} activitiesCount={activitiesCount} tracksCount={tracksCount} />
+        <PreferencesSection me={me} onPrefsChanged={onPrefsChanged} />
+        <UnlinkSection me={me} onUnlinked={onUnlinked} />
+        <ChangePasswordSection />
+        <DangerSection onAccountDeleted={onAccountDeleted} />
+      </div>
+    </>
+  );
+}
+
+function PreferencesSection({ me, onPrefsChanged }: { me: Me | null; onPrefsChanged: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const enabled = me?.autoPublish !== false;
+
+  async function toggle() {
+    if (!me) return;
+    setBusy(true); setErr(null);
+    try {
+      await api("/api/me/preferences", {
+        method: "POST",
+        body: JSON.stringify({ autoPublish: !enabled }),
+      });
+      await onPrefsChanged();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <section>
+      <h2 className="text-base font-semibold mb-3">Preferences</h2>
+      <div className="bg-card border border-line rounded">
+        <div className="flex items-start justify-between px-4 py-4 gap-4">
+          <div className="min-w-0">
+            <div className="text-fg font-medium text-sm">Auto-publish to Strava</div>
+            <div className="text-xs text-muted mt-1">
+              When on, Stravify writes the music summary and run link into each new Strava activity description automatically.
+              When off, runs are still saved here but you'll need to click <span className="text-fg">Publish</span> on each run to update its Strava description.
+            </div>
+          </div>
+          <button
+            onClick={toggle} disabled={busy || !me}
+            aria-pressed={enabled}
+            className={
+              "relative inline-flex items-center w-11 h-6 rounded-full shrink-0 transition-colors p-0.5 " +
+              (enabled ? "bg-brand" : "bg-line-strong") +
+              (busy ? " opacity-60 cursor-not-allowed" : "")
+            }
+          >
+            <span
+              className="block w-5 h-5 rounded-full bg-white shadow"
+              style={{
+                transform: enabled ? "translateX(20px)" : "translateX(0)",
+                transition: "transform 150ms ease",
+              }}
+            />
+          </button>
+        </div>
+        {err && <div className="text-xs text-danger px-4 pb-3">{err}</div>}
+      </div>
+    </section>
+  );
+}
+
+function AccountInfo({ me, activitiesCount, tracksCount }: {
+  me: Me | null; activitiesCount: number; tracksCount: number;
+}) {
+  return (
+    <section>
+      <h2 className="text-base font-semibold mb-3">Account</h2>
+      <div className="bg-card border border-line rounded">
+        <InfoRow label="Email" value={me?.email ?? "—"} />
+        <InfoRow label="Joined" value={me?.createdAt ? new Date(me.createdAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "—"} />
+        <InfoRow label="Runs logged" value={String(activitiesCount)} />
+        <InfoRow label="Tracks logged" value={String(tracksCount)} />
+      </div>
+    </section>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between px-4 py-3 border-b border-line last:border-b-0 text-sm">
+      <span className="text-muted">{label}</span>
+      <span className="text-fg tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+function UnlinkSection({ me, onUnlinked }: { me: Me | null; onUnlinked: () => Promise<void> }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function unlink(service: "strava" | "spotify" | "lastfm", label: string) {
+    if (!confirm(`Unlink ${label}? You can relink anytime.`)) return;
+    setBusy(service); setErr(null);
+    try {
+      await api(`/api/me/unlink`, { method: "POST", body: JSON.stringify({ service }) });
+      await onUnlinked();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(null); }
+  }
+
+  const rows: { key: "strava" | "spotify" | "lastfm"; label: string; linked: boolean; display?: string }[] = [
+    { key: "strava",  label: "Strava",  linked: !!me?.stravaLinked,  display: me?.stravaAthleteName },
+    { key: "lastfm",  label: "Last.fm", linked: !!me?.lastfmLinked,  display: me?.lastfmUsername },
+    { key: "spotify", label: "Spotify", linked: !!me?.spotifyLinked, display: me?.spotifyUserName },
+  ];
+  return (
+    <section>
+      <h2 className="text-base font-semibold mb-3">Linked services</h2>
+      <div className="bg-card border border-line rounded">
+        {rows.map(r => (
+          <div key={r.key} className="flex items-center justify-between px-4 py-3 border-b border-line last:border-b-0 text-sm">
+            <div className="min-w-0">
+              <div className="text-fg font-medium">{r.label}</div>
+              <div className="text-xs text-muted truncate">
+                {r.linked ? (r.display ? `Linked · ${r.display}` : "Linked") : "Not linked"}
+              </div>
+            </div>
+            <button
+              onClick={() => unlink(r.key, r.label)}
+              disabled={!r.linked || busy !== null}
+              className="text-xs font-medium border border-line-strong hover:bg-card-2 hover:border-[#3a3a3a] disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 rounded"
+            >
+              {busy === r.key ? "Unlinking…" : "Unlink"}
+            </button>
+          </div>
+        ))}
+      </div>
+      {err && <div className="text-danger text-xs mt-2">{err}</div>}
+    </section>
+  );
+}
+
+function ChangePasswordSection() {
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setMsg(null);
+    try {
+      await changePassword(oldPw, newPw);
+      setOldPw(""); setNewPw("");
+      setMsg({ kind: "ok", text: "Password updated." });
+    } catch (e: any) {
+      setMsg({ kind: "err", text: e?.message || "Couldn't change password." });
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <section>
+      <h2 className="text-base font-semibold mb-3">Change password</h2>
+      <form onSubmit={onSubmit} className="bg-card border border-line rounded p-4 max-w-md">
+        <label className="block mb-3 text-xs font-medium text-muted">
+          Current password
+          <input
+            type="password" autoComplete="current-password" required
+            value={oldPw} onChange={(e) => setOldPw(e.target.value)}
+            className="block w-full mt-1.5 bg-card-2 border border-line-strong rounded px-3 py-2 text-sm text-fg outline-none focus:border-brand"
+          />
+        </label>
+        <label className="block mb-3 text-xs font-medium text-muted">
+          New password
+          <input
+            type="password" autoComplete="new-password" required minLength={10}
+            value={newPw} onChange={(e) => setNewPw(e.target.value)}
+            className="block w-full mt-1.5 bg-card-2 border border-line-strong rounded px-3 py-2 text-sm text-fg outline-none focus:border-brand"
+          />
+        </label>
+        {msg && (
+          <div className={"text-xs mb-3 " + (msg.kind === "ok" ? "text-brand" : "text-danger")}>{msg.text}</div>
+        )}
+        <button
+          type="submit" disabled={busy}
+          className="bg-brand hover:bg-brand-hover text-black font-semibold px-4 py-2 rounded text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {busy ? "Updating…" : "Update password"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function DangerSection({ onAccountDeleted }: { onAccountDeleted: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function doDelete() {
+    const confirmText = prompt(
+      "This permanently deletes your account, all your run history, and all logged tracks. It does NOT remove descriptions Stravify has already written to past Strava activities — you'll need to clean those manually if you want.\n\nType DELETE to confirm.",
+    );
+    if (confirmText !== "DELETE") return;
+    setBusy(true); setErr(null);
+    try {
+      await api("/api/me", { method: "DELETE" });
+      await deleteCognitoUser();
+      onAccountDeleted();
+    } catch (e: any) {
+      setErr(e?.message || "Couldn't delete account.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="text-base font-semibold mb-3 text-danger">Danger zone</h2>
+      <div className="bg-card border border-danger/40 rounded p-4">
+        <div className="text-sm text-fg font-medium mb-1">Delete account</div>
+        <p className="text-xs text-muted mb-4">
+          Permanently removes your account, all your run history, and every logged track. Strava activities you've already had Stravify annotate will keep their descriptions on Strava — clean those up manually if you want.
+        </p>
+        <button
+          onClick={doDelete} disabled={busy}
+          className="border border-danger/60 text-danger hover:bg-danger/10 px-4 py-2 rounded text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {busy ? "Deleting…" : "Delete my account"}
+        </button>
+        {err && <div className="text-xs text-danger mt-2">{err}</div>}
+      </div>
+    </section>
   );
 }
 

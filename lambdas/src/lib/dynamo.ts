@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand,
-  QueryCommand, DeleteCommand,
+  QueryCommand, DeleteCommand, BatchWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 const raw = new DynamoDBClient({});
@@ -47,6 +47,72 @@ export async function updateUser(sub: string, patch: Record<string, unknown>) {
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
   }));
+}
+
+export async function removeUserAttrs(sub: string, attrs: string[]) {
+  if (attrs.length === 0) return;
+  const names: Record<string, string> = {};
+  const removes: string[] = [];
+  attrs.forEach((a, i) => {
+    const nk = `#k${i}`;
+    names[nk] = a;
+    removes.push(nk);
+  });
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.users,
+    Key: { cognitoSub: sub },
+    UpdateExpression: "REMOVE " + removes.join(", "),
+    ExpressionAttributeNames: names,
+  }));
+}
+
+export async function deleteUser(sub: string) {
+  await ddb.send(new DeleteCommand({
+    TableName: TABLES.users, Key: { cognitoSub: sub },
+  }));
+}
+
+async function batchDelete(table: string, keys: Record<string, unknown>[]) {
+  for (let i = 0; i < keys.length; i += 25) {
+    const batch = keys.slice(i, i + 25);
+    await ddb.send(new BatchWriteCommand({
+      RequestItems: { [table]: batch.map(Key => ({ DeleteRequest: { Key } })) },
+    }));
+  }
+}
+
+export async function deleteAllActivitiesForUser(sub: string) {
+  let lek: any = undefined;
+  do {
+    const r = await ddb.send(new QueryCommand({
+      TableName: TABLES.activities,
+      KeyConditionExpression: "cognitoSub = :s",
+      ExpressionAttributeValues: { ":s": sub },
+      ProjectionExpression: "cognitoSub, activityId",
+      ExclusiveStartKey: lek,
+    }));
+    await batchDelete(TABLES.activities, (r.Items ?? []).map(i => ({
+      cognitoSub: i.cognitoSub, activityId: i.activityId,
+    })));
+    lek = r.LastEvaluatedKey;
+  } while (lek);
+}
+
+export async function deleteAllSongPlaysForUser(sub: string) {
+  let lek: any = undefined;
+  do {
+    const r = await ddb.send(new QueryCommand({
+      TableName: TABLES.songPlays,
+      KeyConditionExpression: "cognitoSub = :s",
+      ExpressionAttributeValues: { ":s": sub },
+      ProjectionExpression: "cognitoSub, sortKey",
+      ExclusiveStartKey: lek,
+    }));
+    await batchDelete(TABLES.songPlays, (r.Items ?? []).map(i => ({
+      cognitoSub: i.cognitoSub, sortKey: i.sortKey,
+    })));
+    lek = r.LastEvaluatedKey;
+  } while (lek);
 }
 
 export async function findUserByStravaAthlete(athleteId: number) {

@@ -109,6 +109,54 @@ export async function getRecentlyPlayed(token: string, afterMs: number): Promise
   }));
 }
 
+// Client-credentials token, cached in memory across warm Lambda invocations.
+// Used for public-data endpoints (search, artists) that don't need user auth.
+let appToken: { token: string; expiresAt: number } | null = null;
+
+async function getAppToken(): Promise<string> {
+  if (appToken && appToken.expiresAt > Date.now()) return appToken.token;
+  const { clientId, clientSecret } = await getSpotifySecret();
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: {
+      Authorization: basicAuth(clientId, clientSecret),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ grant_type: "client_credentials" }),
+  });
+  if (!res.ok) throw new Error(`Spotify client_credentials: ${res.status}`);
+  const data: any = await res.json();
+  appToken = {
+    token: data.access_token,
+    // Expire ~1 minute early so we don't try to use a token mid-flight.
+    expiresAt: Date.now() + (data.expires_in - 60) * 1000,
+  };
+  return appToken.token;
+}
+
+// Look up artists by name (no auth required beyond app credentials). Used for
+// the Last.fm path where we only have artist names, not Spotify IDs.
+// Returns a Map keyed by lower-cased name, with the artist's genres array.
+export async function getArtistsGenresByNames(names: string[]): Promise<Map<string, string[]>> {
+  const token = await getAppToken();
+  const unique = [...new Set(names.map(n => n.toLowerCase()))].slice(0, 30);
+  const out = new Map<string, string[]>();
+  const results = await Promise.allSettled(unique.map(async (name) => {
+    const params = new URLSearchParams({ q: name, type: "artist", limit: "1" });
+    const res = await fetch(`${API}/search?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return [name, [] as string[]] as const;
+    const data: any = await res.json();
+    const top = data.artists?.items?.[0];
+    return [name, (top?.genres ?? []) as string[]] as const;
+  }));
+  for (const r of results) {
+    if (r.status === "fulfilled") out.set(r.value[0], r.value[1] as string[]);
+  }
+  return out;
+}
+
 export async function getArtistsGenres(token: string, artistIds: string[]): Promise<Map<string, string[]>> {
   const unique = [...new Set(artistIds)];
   const out = new Map<string, string[]>();

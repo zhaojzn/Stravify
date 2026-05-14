@@ -77,6 +77,32 @@ export async function listRecentActivities(token: string, perPage = 30): Promise
   return res.json() as Promise<any[]>;
 }
 
+export interface ActivityStreams {
+  time?: number[];      // seconds from start
+  distance?: number[];  // meters from start
+  velocity?: number[];  // m/s
+}
+
+export async function getActivityStreams(
+  token: string,
+  activityId: number,
+  keys = ["time", "distance", "velocity_smooth"],
+): Promise<ActivityStreams> {
+  const url = `${API}/activities/${activityId}/streams?keys=${keys.join(",")}&key_by_type=true`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    // Streams may not exist (e.g. activities entered manually with no GPS).
+    if (res.status === 404) return {};
+    throw new Error(`Strava streams ${activityId}: ${res.status}`);
+  }
+  const data: any = await res.json();
+  return {
+    time: data.time?.data,
+    distance: data.distance?.data,
+    velocity: data.velocity_smooth?.data,
+  };
+}
+
 export async function updateActivityDescription(token: string, activityId: number, description: string) {
   const res = await fetch(`${API}/activities/${activityId}`, {
     method: "PUT",

@@ -4,7 +4,9 @@ import * as spotify from "./spotify";
 import * as lastfm from "./lastfm";
 import { normalizeTag, bucket, BreakdownItem } from "./genres";
 
-export const STRAVIFY_MARKER = "🎵 Stravify";
+// First line of the Stravify-added block. Also used to detect + strip a
+// previously-written block when re-publishing.
+export const STRAVIFY_MARKER = "🎵 Don't be afraid to share your music taste";
 
 export interface ProcessResult {
   activityId: number;
@@ -32,7 +34,21 @@ async function fetchTracksAndGenres(
   if (user.lastfmUsername) {
     const tracks = await lastfm.getRecentTracks(user.lastfmUsername, startMs, endMs + 5 * 60_000);
     if (tracks.length === 0) return { source: "lastfm", tracks: [], genresByArtist: new Map() };
-    const genresByArtist = await lastfm.getArtistTags(tracks.flatMap(t => t.artistNames));
+    // Use Spotify's curated artist genres via Client-Credentials (no user
+    // Spotify link required). Falls back to Last.fm tags for any artist
+    // Spotify doesn't recognize.
+    const artistNames = tracks.flatMap(t => t.artistNames);
+    const fromSpotify = await spotify.getArtistsGenresByNames(artistNames).catch(() => new Map<string, string[]>());
+    const missing = artistNames.filter(n => (fromSpotify.get(n.toLowerCase()) ?? []).length === 0);
+    const fromLastfm = missing.length > 0
+      ? await lastfm.getArtistTags(missing).catch(() => new Map<string, string[]>())
+      : new Map<string, string[]>();
+    const genresByArtist = new Map<string, string[]>();
+    for (const name of new Set(artistNames.map(n => n.toLowerCase()))) {
+      const spot = fromSpotify.get(name) ?? [];
+      if (spot.length > 0) genresByArtist.set(name, spot);
+      else genresByArtist.set(name, fromLastfm.get(name) ?? []);
+    }
     return { source: "lastfm", tracks, genresByArtist };
   }
   if (user.spotifyTokens) {
@@ -53,14 +69,15 @@ async function fetchTracksAndGenres(
 export async function processActivity(
   user: any,
   activityId: number,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; writeToStrava?: boolean } = {},
 ): Promise<ProcessResult> {
+  const writeToStrava = opts.writeToStrava !== false; // default true
   const sub: string = user.cognitoSub;
   const stravaTokens = await strava.getFreshTokens(sub, user.stravaTokens);
   const activity = await strava.getActivity(stravaTokens.accessToken, activityId);
 
   if (activity.type !== "Run") return { activityId, status: "not-a-run" };
-  if (!opts.force && typeof activity.description === "string" && activity.description.includes(STRAVIFY_MARKER)) {
+  if (writeToStrava && !opts.force && typeof activity.description === "string" && activity.description.includes(STRAVIFY_MARKER)) {
     return { activityId, status: "already-annotated" };
   }
 
@@ -90,11 +107,26 @@ export async function processActivity(
   const breakdown = computeGenreBreakdown(music.tracks, music.genresByArtist);
   const frontUrl = process.env.DEFAULT_FRONTEND_URL!;
   const runUrl = `${frontUrl}/run/${activityId}`;
-  const baseDescription = stripStravifyBlock(activity.description);
-  const description = buildDescription(baseDescription, runUrl, breakdown);
-  await strava.updateActivityDescription(stravaTokens.accessToken, activityId, description);
 
   const now = new Date().toISOString();
+  let publishedAt: string | undefined;
+  if (writeToStrava) {
+    const baseDescription = stripStravifyBlock(activity.description);
+    const description = buildDescription(baseDescription, runUrl, breakdown);
+    await strava.updateActivityDescription(stravaTokens.accessToken, activityId, description);
+    publishedAt = now;
+  }
+
+  // Pull the pace chart streams (time, distance, velocity) and downsample
+  // so the DynamoDB item stays small. Failures here shouldn't block the rest.
+  let streams: { time: number[]; distance: number[]; velocity: number[] } | undefined;
+  try {
+    const raw = await strava.getActivityStreams(stravaTokens.accessToken, activityId);
+    streams = downsampleStreams(raw, 150);
+  } catch (e) {
+    console.warn("streams fetch failed", e);
+  }
+
   await putActivity({
     cognitoSub: sub,
     activityId: String(activityId),
@@ -106,9 +138,10 @@ export async function processActivity(
     tracks: music.tracks,
     genreBreakdown: breakdown,
     musicSource: music.source,
+    streams,
     processedAt: now,
-    publishedAt: now,
-    publishedUrl: runUrl,
+    publishedAt,
+    publishedUrl: publishedAt ? runUrl : undefined,
   });
 
   for (const t of music.tracks) {
@@ -158,17 +191,39 @@ function stripStravifyBlock(desc: string | null | undefined): string {
   return desc.slice(0, idx).replace(/\n+$/, "");
 }
 
+function downsampleStreams(raw: strava.ActivityStreams, targetPoints: number): {
+  time: number[]; distance: number[]; velocity: number[];
+} | undefined {
+  const { time, distance, velocity } = raw;
+  if (!time || !distance || !velocity) return undefined;
+  const len = Math.min(time.length, distance.length, velocity.length);
+  if (len < 2) return undefined;
+  if (len <= targetPoints) {
+    return {
+      time: time.slice(0, len),
+      distance: distance.slice(0, len),
+      velocity: velocity.slice(0, len),
+    };
+  }
+  const step = len / targetPoints;
+  const t: number[] = [], d: number[] = [], v: number[] = [];
+  for (let i = 0; i < targetPoints; i++) {
+    const idx = Math.min(len - 1, Math.floor(i * step));
+    t.push(time[idx]);
+    d.push(distance[idx]);
+    v.push(velocity[idx]);
+  }
+  return { time: t, distance: d, velocity: v };
+}
+
 function buildDescription(
   existing: string | null | undefined,
   runUrl: string,
   breakdown: BreakdownItem[],
 ): string {
-  const top = breakdown.slice(0, 3).filter(b => b.percent > 0);
+  const top = breakdown.slice(0, 4).filter(b => b.percent > 0);
   const summary = top.map(b => `${b.percent}% ${b.genre}`).join(" · ");
-  const lines = [
-    `${STRAVIFY_MARKER} ${runUrl}`,
-    summary,
-  ].filter(Boolean);
+  const lines = [STRAVIFY_MARKER, runUrl, summary].filter(Boolean);
   const block = lines.join("\n");
   return existing ? `${existing}\n\n${block}` : block;
 }

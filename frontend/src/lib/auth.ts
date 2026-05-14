@@ -4,6 +4,9 @@ import {
   AuthenticationDetails,
   CognitoUserAttribute,
   CognitoUserSession,
+  CognitoIdToken,
+  CognitoAccessToken,
+  CognitoRefreshToken,
   ISignUpResult,
 } from "amazon-cognito-identity-js";
 import { config } from "../config";
@@ -91,6 +94,45 @@ export function signOut() {
   const user = userPool.getCurrentUser();
   user?.signOut();
   clear();
+}
+
+// Builds a CognitoUser whose session is pre-set from our stored tokens, so
+// authenticated calls like changePassword/deleteUser don't have to look up
+// tokens in the SDK's localStorage format (which we don't use).
+async function authenticatedUser(): Promise<CognitoUser> {
+  // Refresh once to make sure tokens we have aren't expired.
+  await refreshSession().catch(() => {});
+  const t = read();
+  if (!t) throw new Error("Not signed in");
+  const user = new CognitoUser({ Username: t.email, Pool: userPool });
+  const session = new CognitoUserSession({
+    IdToken: new CognitoIdToken({ IdToken: t.idToken }),
+    AccessToken: new CognitoAccessToken({ AccessToken: t.accessToken }),
+    RefreshToken: new CognitoRefreshToken({ RefreshToken: t.refreshToken }),
+  });
+  user.setSignInUserSession(session);
+  return user;
+}
+
+export async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
+  const user = await authenticatedUser();
+  return new Promise((resolve, reject) => {
+    user.changePassword(oldPassword, newPassword, (err) => {
+      if (err) return reject(err);
+      resolve();
+    });
+  });
+}
+
+export async function deleteCognitoUser(): Promise<void> {
+  const user = await authenticatedUser();
+  return new Promise((resolve, reject) => {
+    user.deleteUser((err) => {
+      if (err) return reject(err);
+      clear();
+      resolve();
+    });
+  });
 }
 
 function getCachedUser(email: string): CognitoUser {

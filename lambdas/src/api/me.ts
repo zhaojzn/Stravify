@@ -15,11 +15,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   return ok({
     cognitoSub: sub,
     email: user.email ?? email,
+    createdAt: user.createdAt,
     stravaLinked: !!user.stravaTokens,
     stravaAthleteName: user.stravaAthleteName,
     spotifyLinked: !!user.spotifyTokens,
     spotifyUserName: user.spotifyUserName,
     lastfmLinked: !!user.lastfmUsername,
     lastfmUsername: user.lastfmUsername,
+    autoPublish: user.autoPublish !== false, // default true
   });
 };

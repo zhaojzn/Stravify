@@ -19,17 +19,33 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
   try {
     const body = JSON.parse(event.body || "{}");
-    if (body.object_type !== "activity") return ok({ ignored: "not an activity" });
-    if (body.aspect_type !== "create" && body.aspect_type !== "update") return ok({ ignored: body.aspect_type });
+    console.log("webhook event:", JSON.stringify(body));
+
+    if (body.object_type !== "activity") {
+      console.log(`ignored: object_type=${body.object_type}`);
+      return ok({ ignored: "not an activity" });
+    }
+    if (body.aspect_type !== "create" && body.aspect_type !== "update") {
+      console.log(`ignored: aspect_type=${body.aspect_type}`);
+      return ok({ ignored: body.aspect_type });
+    }
 
     const user = await findUserByStravaAthlete(body.owner_id);
-    if (!user) return ok({ ignored: "unknown athlete" });
-    if (!user.spotifyTokens) return ok({ ignored: "spotify not linked" });
+    if (!user) {
+      console.log(`ignored: no user for athlete ${body.owner_id}`);
+      return ok({ ignored: "unknown athlete" });
+    }
+    if (!user.spotifyTokens && !user.lastfmUsername) {
+      console.log(`ignored: user ${user.cognitoSub} has no music source`);
+      return ok({ ignored: "no music source linked" });
+    }
 
-    const result = await processActivity(user, body.object_id);
+    const autoPublish = user.autoPublish !== false; // default ON
+    console.log(`processing activity ${body.object_id} for user ${user.cognitoSub} (autoPublish=${autoPublish})`);
+    const result = await processActivity(user, body.object_id, { writeToStrava: autoPublish });
+    console.log("processActivity result:", JSON.stringify(result));
     return ok(result);
   } catch (e) {
-    // Always return 200 so Strava doesn't retry endlessly.
     console.error("webhook error", e);
     return ok({ swallowed: (e as Error).message });
   }

@@ -11,7 +11,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const item = await getActivityById(id);
   if (!item) return notFound();
 
-  // Strip identifiers that aren't meant to be public.
   return ok({
     activityId: item.activityId,
     name: item.name,
@@ -22,5 +21,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     musicSource: item.musicSource,
     tracks: item.tracks ?? [],
     genreBreakdown: item.genreBreakdown ?? [],
+    streams: item.streams,
   });
 };

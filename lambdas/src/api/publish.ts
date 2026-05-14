@@ -21,12 +21,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const frontUrl = process.env.DEFAULT_FRONTEND_URL!;
   const runUrl = `${frontUrl}/run/${id}`;
 
-  const top = (activity.genreBreakdown as any[] | undefined)?.slice(0, 3) ?? [];
+  const top = (activity.genreBreakdown as any[] | undefined)?.slice(0, 4) ?? [];
   const teaser = top.length > 0
     ? top.map(g => `${g.percent}% ${g.genre}`).join(" · ")
     : `${(activity.tracks as any[] | undefined)?.length ?? 0} tracks`;
 
-  const block = `${STRAVIFY_MARKER} ${runUrl}\n${teaser}`;
+  const block = [STRAVIFY_MARKER, runUrl, teaser].join("\n");
 
   // Strip any existing Stravify block before re-writing.
   const tokens = await strava.getFreshTokens(sub, user.stravaTokens);
