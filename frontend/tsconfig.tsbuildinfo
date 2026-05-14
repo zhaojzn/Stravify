@@ -1,0 +1,1 @@
+{"root":["./src/config.ts","./src/main.tsx","./src/components/piechart.tsx","./src/lib/api.ts","./src/lib/auth.ts","./src/pages/confirm.tsx","./src/pages/dashboard.tsx","./src/pages/landing.tsx","./src/pages/rundetail.tsx","./src/pages/signin.tsx","./src/pages/signup.tsx","./src/pages/auth-ui.tsx"],"version":"5.9.3"}

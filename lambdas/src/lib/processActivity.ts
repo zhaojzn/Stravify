@@ -1,0 +1,174 @@
+import { putActivity, recordSongPlay } from "./dynamo";
+import * as strava from "./strava";
+import * as spotify from "./spotify";
+import * as lastfm from "./lastfm";
+import { normalizeTag, bucket, BreakdownItem } from "./genres";
+
+export const STRAVIFY_MARKER = "🎵 Stravify";
+
+export interface ProcessResult {
+  activityId: number;
+  status: "annotated" | "no-tracks" | "already-annotated" | "not-a-run" | "no-music-source";
+  trackCount?: number;
+  source?: "lastfm" | "spotify";
+}
+
+interface MusicTrack {
+  trackId: string;
+  trackName: string;
+  artistIds: string[];
+  artistNames: string[];
+  playedAt: string;
+  durationMs: number;
+  imageUrl?: string;
+}
+
+async function fetchTracksAndGenres(
+  user: any,
+  startMs: number,
+  endMs: number,
+): Promise<{ source: "lastfm" | "spotify"; tracks: MusicTrack[]; genresByArtist: Map<string, string[]> } | null> {
+  // Prefer Last.fm — full history, no 50-track ceiling.
+  if (user.lastfmUsername) {
+    const tracks = await lastfm.getRecentTracks(user.lastfmUsername, startMs, endMs + 5 * 60_000);
+    if (tracks.length === 0) return { source: "lastfm", tracks: [], genresByArtist: new Map() };
+    const genresByArtist = await lastfm.getArtistTags(tracks.flatMap(t => t.artistNames));
+    return { source: "lastfm", tracks, genresByArtist };
+  }
+  if (user.spotifyTokens) {
+    const sub = user.cognitoSub;
+    const tokens = await spotify.getFreshTokens(sub, user.spotifyTokens);
+    const recent = await spotify.getRecentlyPlayed(tokens.accessToken, startMs - 1);
+    const tracks = recent.filter(t => {
+      const at = new Date(t.playedAt).getTime();
+      return at >= startMs && at <= endMs + 5 * 60_000;
+    });
+    if (tracks.length === 0) return { source: "spotify", tracks: [], genresByArtist: new Map() };
+    const genresByArtist = await spotify.getArtistsGenres(tokens.accessToken, tracks.flatMap(t => t.artistIds));
+    return { source: "spotify", tracks, genresByArtist };
+  }
+  return null;
+}
+
+export async function processActivity(
+  user: any,
+  activityId: number,
+  opts: { force?: boolean } = {},
+): Promise<ProcessResult> {
+  const sub: string = user.cognitoSub;
+  const stravaTokens = await strava.getFreshTokens(sub, user.stravaTokens);
+  const activity = await strava.getActivity(stravaTokens.accessToken, activityId);
+
+  if (activity.type !== "Run") return { activityId, status: "not-a-run" };
+  if (!opts.force && typeof activity.description === "string" && activity.description.includes(STRAVIFY_MARKER)) {
+    return { activityId, status: "already-annotated" };
+  }
+
+  const startMs = new Date(activity.start_date).getTime();
+  const endMs = startMs + (activity.elapsed_time as number) * 1000;
+
+  const music = await fetchTracksAndGenres(user, startMs, endMs);
+  if (!music) return { activityId, status: "no-music-source" };
+
+  if (music.tracks.length === 0) {
+    await putActivity({
+      cognitoSub: sub,
+      activityId: String(activityId),
+      name: activity.name,
+      startTime: activity.start_date,
+      elapsedSeconds: activity.elapsed_time,
+      distanceMeters: activity.distance,
+      type: activity.type,
+      tracks: [],
+      genreBreakdown: [],
+      musicSource: music.source,
+      processedAt: new Date().toISOString(),
+    });
+    return { activityId, status: "no-tracks", source: music.source, trackCount: 0 };
+  }
+
+  const breakdown = computeGenreBreakdown(music.tracks, music.genresByArtist);
+  const frontUrl = process.env.DEFAULT_FRONTEND_URL!;
+  const runUrl = `${frontUrl}/run/${activityId}`;
+  const baseDescription = stripStravifyBlock(activity.description);
+  const description = buildDescription(baseDescription, runUrl, breakdown);
+  await strava.updateActivityDescription(stravaTokens.accessToken, activityId, description);
+
+  const now = new Date().toISOString();
+  await putActivity({
+    cognitoSub: sub,
+    activityId: String(activityId),
+    name: activity.name,
+    startTime: activity.start_date,
+    elapsedSeconds: activity.elapsed_time,
+    distanceMeters: activity.distance,
+    type: activity.type,
+    tracks: music.tracks,
+    genreBreakdown: breakdown,
+    musicSource: music.source,
+    processedAt: now,
+    publishedAt: now,
+    publishedUrl: runUrl,
+  });
+
+  for (const t of music.tracks) {
+    await recordSongPlay({
+      cognitoSub: sub,
+      sortKey: `${t.trackId}#${t.playedAt}`,
+      trackId: t.trackId,
+      trackName: t.trackName,
+      artistName: t.artistNames.join(", "),
+      playedAt: t.playedAt,
+      activityId: String(activityId),
+      source: music.source,
+    });
+  }
+  return { activityId, status: "annotated", source: music.source, trackCount: music.tracks.length };
+}
+
+function computeGenreBreakdown(
+  tracks: MusicTrack[],
+  genresByArtist: Map<string, string[]>,
+): BreakdownItem[] {
+  const counts = new Map<string, number>();
+  for (const t of tracks) {
+    const primary = t.artistIds[0];
+    const rawGenres = genresByArtist.get(primary) ?? [];
+    // Normalize + dedupe per artist so "k-pop, kpop, korean" doesn't triple-count.
+    const normalized = [...new Set(rawGenres.map(normalizeTag))];
+    if (normalized.length === 0) {
+      counts.set("uncategorized", (counts.get("uncategorized") || 0) + 1);
+      continue;
+    }
+    const weight = 1 / normalized.length;
+    for (const g of normalized) counts.set(g, (counts.get(g) || 0) + weight);
+  }
+  const total = [...counts.values()].reduce((a, b) => a + b, 0) || 1;
+  const all: BreakdownItem[] = [...counts.entries()]
+    .map(([genre, n]) => ({ genre, trackCount: n, percent: Math.round((n / total) * 100) }))
+    .sort((a, b) => b.percent - a.percent);
+  // Cap to 8 + "other" so the pie chart stays readable.
+  return bucket(all, 8);
+}
+
+function stripStravifyBlock(desc: string | null | undefined): string {
+  if (!desc) return "";
+  const idx = desc.indexOf(STRAVIFY_MARKER);
+  if (idx < 0) return desc;
+  return desc.slice(0, idx).replace(/\n+$/, "");
+}
+
+function buildDescription(
+  existing: string | null | undefined,
+  runUrl: string,
+  breakdown: BreakdownItem[],
+): string {
+  const top = breakdown.slice(0, 3).filter(b => b.percent > 0);
+  const summary = top.map(b => `${b.percent}% ${b.genre}`).join(" · ");
+  const lines = [
+    `${STRAVIFY_MARKER} ${runUrl}`,
+    summary,
+  ].filter(Boolean);
+  const block = lines.join("\n");
+  return existing ? `${existing}\n\n${block}` : block;
+}

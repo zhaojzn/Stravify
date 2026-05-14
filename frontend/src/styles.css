@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme {
+  --color-page: #0a0a0a;
+  --color-card: #121212;
+  --color-card-2: #181818;
+  --color-card-hover: #1f1f1f;
+  --color-line: #242424;
+  --color-line-strong: #2e2e2e;
+  --color-fg: #fafafa;
+  --color-muted: #a3a3a3;
+  --color-dim: #707070;
+  --color-brand: #1ed760;
+  --color-brand-hover: #18b850;
+  --color-danger: #f15a5a;
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Liberation Sans", sans-serif;
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    background-color: var(--color-page);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Inputs default to system styling; we re-style per component. */
+  input { color-scheme: dark; }
+}
