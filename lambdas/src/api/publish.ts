@@ -1,7 +1,7 @@
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 import { getUser, getActivity, putActivity } from "../lib/dynamo";
 import * as strava from "../lib/strava";
-import { STRAVIFY_MARKER } from "../lib/processActivity";
+import { STRAVIFY_LINK_PREFIX } from "../lib/processActivity";
 import { getUserSub, ok, unauthorized, notFound, bad } from "../lib/response";
 
 // Replace the Stravify block in the Strava description with a short summary
@@ -26,7 +26,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     ? top.map(g => `${g.percent}% ${g.genre}`).join(" · ")
     : `${(activity.tracks as any[] | undefined)?.length ?? 0} tracks`;
 
-  const block = [STRAVIFY_MARKER, runUrl, teaser].join("\n");
+  const block = [runUrl, teaser].join("\n");
 
   // Strip any existing Stravify block before re-writing.
   const tokens = await strava.getFreshTokens(sub, user.stravaTokens);
@@ -44,7 +44,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
 function stripStravifyBlock(desc: string | null | undefined): string {
   if (!desc) return "";
-  const idx = desc.indexOf(STRAVIFY_MARKER);
+  const legacyIdx = desc.indexOf("🎵 Don't be afraid");
+  const urlIdx = desc.indexOf(STRAVIFY_LINK_PREFIX);
+  const idx = legacyIdx >= 0 && (urlIdx < 0 || legacyIdx < urlIdx) ? legacyIdx : urlIdx;
   if (idx < 0) return desc;
   return desc.slice(0, idx).replace(/\n+$/, "");
 }

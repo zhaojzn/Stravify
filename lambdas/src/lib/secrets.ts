@@ -1,16 +1,16 @@
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
-const sm = new SecretsManagerClient({});
+const ssm = new SSMClient({});
 const cache = new Map<string, { value: unknown; expiresAt: number }>();
 const TTL_MS = 5 * 60 * 1000;
 
-export async function getJsonSecret<T>(secretId: string): Promise<T> {
-  const cached = cache.get(secretId);
+export async function getJsonSecret<T>(paramName: string): Promise<T> {
+  const cached = cache.get(paramName);
   if (cached && cached.expiresAt > Date.now()) return cached.value as T;
-  const r = await sm.send(new GetSecretValueCommand({ SecretId: secretId }));
-  if (!r.SecretString) throw new Error(`Empty secret: ${secretId}`);
-  const value = JSON.parse(r.SecretString) as T;
-  cache.set(secretId, { value, expiresAt: Date.now() + TTL_MS });
+  const r = await ssm.send(new GetParameterCommand({ Name: paramName, WithDecryption: true }));
+  if (!r.Parameter?.Value) throw new Error(`Empty parameter: ${paramName}`);
+  const value = JSON.parse(r.Parameter.Value) as T;
+  cache.set(paramName, { value, expiresAt: Date.now() + TTL_MS });
   return value;
 }
 
@@ -24,5 +24,5 @@ export interface SpotifySecret {
   clientSecret: string;
 }
 
-export const getStravaSecret = () => getJsonSecret<StravaSecret>(process.env.STRAVA_SECRET_ID!);
-export const getSpotifySecret = () => getJsonSecret<SpotifySecret>(process.env.SPOTIFY_SECRET_ID!);
+export const getStravaSecret = () => getJsonSecret<StravaSecret>(process.env.STRAVA_PARAM_NAME!);
+export const getSpotifySecret = () => getJsonSecret<SpotifySecret>(process.env.SPOTIFY_PARAM_NAME!);

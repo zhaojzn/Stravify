@@ -4,7 +4,7 @@ import { getJsonSecret } from "./secrets";
 const API = "https://ws.audioscrobbler.com/2.0/";
 
 interface LastfmSecret { apiKey: string; sharedSecret: string }
-const getSecret = () => getJsonSecret<LastfmSecret>(process.env.LASTFM_SECRET_ID!);
+const getSecret = () => getJsonSecret<LastfmSecret>(process.env.LASTFM_PARAM_NAME!);
 
 function signParams(params: Record<string, string>, sharedSecret: string): string {
   // Last.fm signature: sort keys, concat key+value (no separators), append shared secret, md5.

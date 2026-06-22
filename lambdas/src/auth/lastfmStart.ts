@@ -14,7 +14,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   // Cast service type: dynamo putOAuthState union didn't include "lastfm" — extend it there too.
   await putOAuthState(state, sub, "lastfm", returnTo);
 
-  const { apiKey } = await getJsonSecret<{ apiKey: string }>(process.env.LASTFM_SECRET_ID!);
+  const { apiKey } = await getJsonSecret<{ apiKey: string }>(process.env.LASTFM_PARAM_NAME!);
   // Last.fm appends ?token=... to the callback URL. We pre-attach our state as a
   // query param; Last.fm will append &token=... after it.
   const callback = `${process.env.API_BASE_URL}/auth/lastfm/callback?state=${state}`;
