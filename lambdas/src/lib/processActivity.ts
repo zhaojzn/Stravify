@@ -136,7 +136,7 @@ export async function processActivity(
 
   // Pull the pace chart streams (time, distance, velocity) and downsample
   // so the DynamoDB item stays small. Failures here shouldn't block the rest.
-  let streams: { time: number[]; distance: number[]; velocity: number[] } | undefined;
+  let streams: { time: number[]; distance: number[]; velocity: number[]; heartrate?: number[] } | undefined;
   try {
     const raw = await strava.getActivityStreams(stravaTokens.accessToken, activityId);
     streams = downsampleStreams(raw, 150);
@@ -216,28 +216,33 @@ function stripStravifyBlock(desc: string | null | undefined): string {
 }
 
 function downsampleStreams(raw: strava.ActivityStreams, targetPoints: number): {
-  time: number[]; distance: number[]; velocity: number[];
+  time: number[]; distance: number[]; velocity: number[]; heartrate?: number[];
 } | undefined {
-  const { time, distance, velocity } = raw;
+  const { time, distance, velocity, heartrate } = raw;
   if (!time || !distance || !velocity) return undefined;
   const len = Math.min(time.length, distance.length, velocity.length);
   if (len < 2) return undefined;
+  // Heart rate is optional — only carry it when it's the same length as the
+  // other streams (i.e. the run was recorded with an HR monitor).
+  const hasHr = Array.isArray(heartrate) && heartrate.length >= len;
   if (len <= targetPoints) {
     return {
       time: time.slice(0, len),
       distance: distance.slice(0, len),
       velocity: velocity.slice(0, len),
+      ...(hasHr ? { heartrate: heartrate!.slice(0, len) } : {}),
     };
   }
   const step = len / targetPoints;
-  const t: number[] = [], d: number[] = [], v: number[] = [];
+  const t: number[] = [], d: number[] = [], v: number[] = [], hr: number[] = [];
   for (let i = 0; i < targetPoints; i++) {
     const idx = Math.min(len - 1, Math.floor(i * step));
     t.push(time[idx]);
     d.push(distance[idx]);
     v.push(velocity[idx]);
+    if (hasHr) hr.push(heartrate![idx]);
   }
-  return { time: t, distance: d, velocity: v };
+  return { time: t, distance: d, velocity: v, ...(hasHr ? { heartrate: hr } : {}) };
 }
 
 function buildDescription(

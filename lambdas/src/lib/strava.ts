@@ -78,15 +78,16 @@ export async function listRecentActivities(token: string, perPage = 30): Promise
 }
 
 export interface ActivityStreams {
-  time?: number[];      // seconds from start
-  distance?: number[];  // meters from start
-  velocity?: number[];  // m/s
+  time?: number[];       // seconds from start
+  distance?: number[];   // meters from start
+  velocity?: number[];   // m/s
+  heartrate?: number[];  // bpm
 }
 
 export async function getActivityStreams(
   token: string,
   activityId: number,
-  keys = ["time", "distance", "velocity_smooth"],
+  keys = ["time", "distance", "velocity_smooth", "heartrate"],
 ): Promise<ActivityStreams> {
   const url = `${API}/activities/${activityId}/streams?keys=${keys.join(",")}&key_by_type=true`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -100,6 +101,7 @@ export async function getActivityStreams(
     time: data.time?.data,
     distance: data.distance?.data,
     velocity: data.velocity_smooth?.data,
+    heartrate: data.heartrate?.data,
   };
 }
 
