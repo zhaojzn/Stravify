@@ -2,11 +2,28 @@ import { putActivity, recordSongPlay } from "./dynamo";
 import * as strava from "./strava";
 import * as spotify from "./spotify";
 import * as lastfm from "./lastfm";
-import { normalizeTag, bucket, BreakdownItem } from "./genres";
+import { primaryCategoryForArtist, bucket, BreakdownItem } from "./genres";
 
-// First line of the Stravify-added block. Also used to detect + strip a
-// previously-written block when re-publishing.
-export const STRAVIFY_MARKER = "🎵 Don't be afraid to share your music taste";
+// URL prefix used to detect + strip a previously-written Stravify block when
+// re-publishing. The block itself is just the run URL + a one-line genre
+// summary, no header text.
+export const STRAVIFY_LINK_PREFIX = "https://jason.zhao.io/run/";
+
+// Older runs were annotated while the app lived at stravify.net. We still need
+// to detect + strip those blocks when re-publishing so we don't leave a stale
+// stravify.net link sitting above the new jason.zhao.io one.
+const LEGACY_LINK_PREFIXES = [
+  "https://stravify.net/run/",
+  "https://www.stravify.net/run/",
+];
+
+// All run-link prefixes we recognize, current first.
+const ALL_LINK_PREFIXES = [STRAVIFY_LINK_PREFIX, ...LEGACY_LINK_PREFIXES];
+
+// True if the description already carries a Stravify block (any known domain).
+export function hasStravifyBlock(desc: string): boolean {
+  return ALL_LINK_PREFIXES.some(p => desc.includes(p));
+}
 
 export interface ProcessResult {
   activityId: number;
@@ -77,7 +94,7 @@ export async function processActivity(
   const activity = await strava.getActivity(stravaTokens.accessToken, activityId);
 
   if (activity.type !== "Run") return { activityId, status: "not-a-run" };
-  if (writeToStrava && !opts.force && typeof activity.description === "string" && activity.description.includes(STRAVIFY_MARKER)) {
+  if (writeToStrava && !opts.force && typeof activity.description === "string" && hasStravifyBlock(activity.description)) {
     return { activityId, status: "already-annotated" };
   }
 
@@ -163,30 +180,37 @@ function computeGenreBreakdown(
   tracks: MusicTrack[],
   genresByArtist: Map<string, string[]>,
 ): BreakdownItem[] {
+  // Resolve each artist to a single major category once, then count tracks
+  // per category (winner-takes-all per artist).
+  const categoryByArtist = new Map<string, string>();
   const counts = new Map<string, number>();
   for (const t of tracks) {
     const primary = t.artistIds[0];
-    const rawGenres = genresByArtist.get(primary) ?? [];
-    // Normalize + dedupe per artist so "k-pop, kpop, korean" doesn't triple-count.
-    const normalized = [...new Set(rawGenres.map(normalizeTag))];
-    if (normalized.length === 0) {
-      counts.set("uncategorized", (counts.get("uncategorized") || 0) + 1);
-      continue;
+    let category = categoryByArtist.get(primary);
+    if (category === undefined) {
+      category = primaryCategoryForArtist(genresByArtist.get(primary) ?? []);
+      categoryByArtist.set(primary, category);
     }
-    const weight = 1 / normalized.length;
-    for (const g of normalized) counts.set(g, (counts.get(g) || 0) + weight);
+    counts.set(category, (counts.get(category) || 0) + 1);
   }
   const total = [...counts.values()].reduce((a, b) => a + b, 0) || 1;
   const all: BreakdownItem[] = [...counts.entries()]
     .map(([genre, n]) => ({ genre, trackCount: n, percent: Math.round((n / total) * 100) }))
     .sort((a, b) => b.percent - a.percent);
-  // Cap to 8 + "other" so the pie chart stays readable.
   return bucket(all, 8);
 }
 
 function stripStravifyBlock(desc: string | null | undefined): string {
   if (!desc) return "";
-  const idx = desc.indexOf(STRAVIFY_MARKER);
+  // Old-format block had a "🎵 Don't be afraid…" header line above the URL;
+  // strip from that line if present, otherwise from the run URL itself.
+  // The run URL may use the current jason.zhao.io domain or a legacy
+  // stravify.net one — take whichever marker appears earliest.
+  const markers = ["🎵 Don't be afraid", ...ALL_LINK_PREFIXES];
+  const idx = markers
+    .map(m => desc.indexOf(m))
+    .filter(i => i >= 0)
+    .reduce((min, i) => (min < 0 || i < min ? i : min), -1);
   if (idx < 0) return desc;
   return desc.slice(0, idx).replace(/\n+$/, "");
 }
@@ -223,7 +247,6 @@ function buildDescription(
 ): string {
   const top = breakdown.slice(0, 4).filter(b => b.percent > 0);
   const summary = top.map(b => `${b.percent}% ${b.genre}`).join(" · ");
-  const lines = [STRAVIFY_MARKER, runUrl, summary].filter(Boolean);
-  const block = lines.join("\n");
+  const block = [runUrl, summary].filter(Boolean).join("\n");
   return existing ? `${existing}\n\n${block}` : block;
 }

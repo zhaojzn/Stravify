@@ -7,16 +7,30 @@ import * as nodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as apigw from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwAuth from "aws-cdk-lib/aws-apigatewayv2-authorizers";
 import * as apigwInt from "aws-cdk-lib/aws-apigatewayv2-integrations";
-import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as path from "path";
 
+// SSM SecureString parameter names. These are created manually (out-of-band)
+// because CloudFormation cannot create SecureString parameters. Populate via:
+//   aws ssm put-parameter --name /stravify/strava  --type SecureString --value '{"clientId":"...","clientSecret":"...","verifyToken":"..."}'
+//   aws ssm put-parameter --name /stravify/spotify --type SecureString --value '{"clientId":"...","clientSecret":"..."}'
+//   aws ssm put-parameter --name /stravify/lastfm  --type SecureString --value '{"apiKey":"...","sharedSecret":"..."}'
+const STRAVA_PARAM_NAME = "/stravify/strava";
+const SPOTIFY_PARAM_NAME = "/stravify/spotify";
+const LASTFM_PARAM_NAME = "/stravify/lastfm";
+
 // Every frontend origin allowed to use this backend (OAuth callbacks + CORS).
-// Both Netlify names are listed so we don't care which one was claimed.
+// The first entry is the canonical site: it becomes DEFAULT_FRONTEND_URL, so
+// run links written into Strava descriptions point there.
 const FRONTEND_URLS = [
+  "https://jason.zhao.io",
+  "https://www.jason.zhao.io",
+  "http://localhost:5173",
+  // Legacy stravify.net origins — kept so previously shared links and their
+  // CORS/OAuth callbacks keep resolving during the transition.
   "https://stravify.net",
   "https://www.stravify.net",
   "https://stravify-live.netlify.app",
-  "http://localhost:5173",
 ];
 
 export class StravifyStack extends cdk.Stack {
@@ -89,18 +103,18 @@ export class StravifyStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // -------------------- Secrets --------------------
-    const stravaSecret = new secretsmanager.Secret(this, "StravaSecret", {
-      secretName: "stravify/strava",
-      description: "Strava OAuth client + verify token. Put: {clientId, clientSecret, verifyToken}",
-    });
-    const spotifySecret = new secretsmanager.Secret(this, "SpotifySecret", {
-      secretName: "stravify/spotify",
-      description: "Spotify OAuth client. Put: {clientId, clientSecret}",
-    });
-    const lastfmSecret = new secretsmanager.Secret(this, "LastfmSecret", {
-      secretName: "stravify/lastfm",
-      description: "Last.fm app credentials. Put: {apiKey, sharedSecret}",
+    // -------------------- Secrets (SSM Parameter Store) --------------------
+    // SecureString parameters are created out-of-band (see top of file).
+    // Using SSM (free) instead of Secrets Manager ($0.40/secret/mo) saves ~$1.20/mo.
+    const paramArn = (name: string) =>
+      `arn:aws:ssm:${this.region}:${this.account}:parameter${name}`;
+    const readParamsPolicy = new iam.PolicyStatement({
+      actions: ["ssm:GetParameter"],
+      resources: [
+        paramArn(STRAVA_PARAM_NAME),
+        paramArn(SPOTIFY_PARAM_NAME),
+        paramArn(LASTFM_PARAM_NAME),
+      ],
     });
 
     // -------------------- API Gateway --------------------
@@ -135,9 +149,9 @@ export class StravifyStack extends cdk.Stack {
       ACTIVITIES_TABLE: activitiesTable.tableName,
       SONGPLAYS_TABLE: songPlaysTable.tableName,
       OAUTH_STATE_TABLE: oauthStateTable.tableName,
-      STRAVA_SECRET_ID: stravaSecret.secretName,
-      SPOTIFY_SECRET_ID: spotifySecret.secretName,
-      LASTFM_SECRET_ID: lastfmSecret.secretName,
+      STRAVA_PARAM_NAME: STRAVA_PARAM_NAME,
+      SPOTIFY_PARAM_NAME: SPOTIFY_PARAM_NAME,
+      LASTFM_PARAM_NAME: LASTFM_PARAM_NAME,
       API_BASE_URL: apiBaseUrl,
       ALLOWED_FRONTEND_URLS: FRONTEND_URLS.join(","),
       DEFAULT_FRONTEND_URL: FRONTEND_URLS[0],
@@ -162,6 +176,7 @@ export class StravifyStack extends cdk.Stack {
       topSongs: makeFn("TopSongsFn", "api/topSongs.ts"),
       sync: makeFn("SyncFn", "api/sync.ts"),
       runById: makeFn("RunByIdFn", "api/runById.ts"),
+      publicRuns: makeFn("PublicRunsFn", "api/publicRuns.ts"),
       publish: makeFn("PublishFn", "api/publish.ts"),
       unlink: makeFn("UnlinkFn", "api/unlink.ts"),
       deleteMe: makeFn("DeleteMeFn", "api/deleteMe.ts"),
@@ -182,9 +197,7 @@ export class StravifyStack extends cdk.Stack {
       activitiesTable.grantReadWriteData(fn);
       songPlaysTable.grantReadWriteData(fn);
       oauthStateTable.grantReadWriteData(fn);
-      stravaSecret.grantRead(fn);
-      spotifySecret.grantRead(fn);
-      lastfmSecret.grantRead(fn);
+      fn.addToRolePolicy(readParamsPolicy);
     }
 
     // -------------------- Routes --------------------
@@ -217,6 +230,7 @@ export class StravifyStack extends cdk.Stack {
       ["GET", "/auth/strava/callback", fns.stravaCallback],
       ["GET", "/auth/spotify/callback", fns.spotifyCallback],
       ["GET", "/auth/lastfm/callback", fns.lastfmCallback],
+      ["GET", "/api/runs", fns.publicRuns],
       ["GET", "/api/runs/{id}", fns.runById],
       ["GET", "/webhooks/strava", fns.webhook],
       ["POST", "/webhooks/strava", fns.webhook],

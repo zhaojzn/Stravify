@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand,
-  QueryCommand, DeleteCommand, BatchWriteCommand,
+  QueryCommand, DeleteCommand, BatchWriteCommand, ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 const raw = new DynamoDBClient({});
@@ -175,6 +175,23 @@ export async function getActivity(sub: string, activityId: string) {
     TableName: TABLES.activities, Key: { cognitoSub: sub, activityId },
   }));
   return r.Item;
+}
+
+// Public, single-owner site: list every processed run across the table. The
+// app only ever has one athlete's data, so a full scan stays tiny and cheap.
+// Paginates so it keeps working even past a 1MB page.
+export async function scanAllActivities() {
+  const items: Record<string, any>[] = [];
+  let lek: any = undefined;
+  do {
+    const r = await ddb.send(new ScanCommand({
+      TableName: TABLES.activities,
+      ExclusiveStartKey: lek,
+    }));
+    items.push(...(r.Items ?? []));
+    lek = r.LastEvaluatedKey;
+  } while (lek);
+  return items;
 }
 
 export async function getActivityById(activityId: string) {
