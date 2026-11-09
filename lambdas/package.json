@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "esbuild tests/runMetrics.test.ts --bundle --platform=node --target=node20 --outfile=dist/tests/runMetrics.test.cjs && node --test dist/tests/runMetrics.test.cjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.700.0",

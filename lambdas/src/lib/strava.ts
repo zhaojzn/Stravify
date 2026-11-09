@@ -22,7 +22,7 @@ export async function exchangeCode(code: string, redirectUri: string): Promise<{
     grant_type: "authorization_code",
     redirect_uri: redirectUri,
   });
-  const res = await fetch(TOKEN_URL, { method: "POST", body });
+  const res = await fetch(TOKEN_URL, { method: "POST", body, signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`Strava token exchange failed: ${res.status} ${await res.text()}`);
   const data: any = await res.json();
   return {
@@ -43,7 +43,7 @@ async function refresh(tokens: StravaTokens): Promise<StravaTokens> {
     grant_type: "refresh_token",
     refresh_token: tokens.refreshToken,
   });
-  const res = await fetch(TOKEN_URL, { method: "POST", body });
+  const res = await fetch(TOKEN_URL, { method: "POST", body, signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`Strava refresh failed: ${res.status}`);
   const data: any = await res.json();
   return {
@@ -64,9 +64,22 @@ export async function getFreshTokens(sub: string, current: StravaTokens): Promis
 export async function getActivity(token: string, activityId: number) {
   const res = await fetch(`${API}/activities/${activityId}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`Strava getActivity ${activityId}: ${res.status}`);
   return res.json() as Promise<any>;
+}
+
+export async function getActivityZones(token: string, activityId: number): Promise<any[]> {
+  const res = await fetch(`${API}/activities/${activityId}/zones`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(8000),
+  });
+  // Strava only exposes zones for eligible activities/accounts.
+  if (res.status === 403 || res.status === 404) return [];
+  if (!res.ok) throw new Error(`Strava activity zones: ${res.status}`);
+  const data: any = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
 export async function listRecentActivities(token: string, perPage = 30): Promise<any[]> {

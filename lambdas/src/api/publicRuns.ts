@@ -19,6 +19,8 @@ export const handler: APIGatewayProxyHandlerV2 = async () => {
         musicSource: a.musicSource,
         trackCount: Array.isArray(a.tracks) ? a.tracks.length : 0,
         genreBreakdown: a.genreBreakdown ?? [],
+        bestEfforts: a.stravaMetrics?.bestEfforts ?? [],
+        bestEffortsSynced: a.stravaMetrics?.version === 1,
       }))
       .sort((a, b) => (a.startTime < b.startTime ? 1 : -1)),
   });

@@ -112,12 +112,19 @@ export async function getRecentlyPlayed(token: string, afterMs: number): Promise
 // Client-credentials token, cached in memory across warm Lambda invocations.
 // Used for public-data endpoints (search, artists) that don't need user auth.
 let appToken: { token: string; expiresAt: number } | null = null;
+let pendingAppToken: Promise<string> | null = null;
 
 async function getAppToken(): Promise<string> {
   if (appToken && appToken.expiresAt > Date.now()) return appToken.token;
+  if (!pendingAppToken) pendingAppToken = fetchAppToken().finally(() => { pendingAppToken = null; });
+  return pendingAppToken;
+}
+
+async function fetchAppToken(): Promise<string> {
   const { clientId, clientSecret } = await getSpotifySecret();
   const res = await fetch(TOKEN_URL, {
     method: "POST",
+    signal: AbortSignal.timeout(8000),
     headers: {
       Authorization: basicAuth(clientId, clientSecret),
       "Content-Type": "application/x-www-form-urlencoded",
@@ -132,6 +139,65 @@ async function getAppToken(): Promise<string> {
     expiresAt: Date.now() + (data.expires_in - 60) * 1000,
   };
   return appToken.token;
+}
+
+const artworkCache = new Map<string, { until: number; value: { imageUrl: string; spotifyUrl: string } | null }>();
+let artworkBlockedUntil = 0;
+const normalized = (value: unknown) => String(value || "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+export const artworkKey = (track: any) => JSON.stringify([String(track.trackName || "").toLowerCase(), String(track.artistNames?.[0] || "").toLowerCase()]);
+
+async function resolveArtwork(track: any) {
+  const key = artworkKey(track);
+  const cached = artworkCache.get(key);
+  if (cached && cached.until > Date.now()) return cached.value;
+  if (!track.trackName || !track.artistNames?.[0] || artworkBlockedUntil > Date.now()) return null;
+  try {
+    const token = await getAppToken();
+    const quote = (s: string) => s.replace(/["\\]/g, " ");
+    const params = new URLSearchParams({
+      q: `track:"${quote(track.trackName)}" artist:"${quote(track.artistNames[0])}"`,
+      type: "track", market: "CA", limit: "5",
+    });
+    const response = await fetch(`${API}/search?${params}`, {
+      headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) {
+      if (response.status === 401) appToken = null;
+      if (response.status === 429) artworkBlockedUntil = Date.now() + Math.max(60, Number(response.headers.get("Retry-After")) || 60) * 1000;
+      return null;
+    }
+    const data: any = await response.json();
+    const item = (data.tracks?.items || []).find((item: any) =>
+      normalized(item.name) === normalized(track.trackName) &&
+      item.artists?.some((a: any) => normalized(a.name) === normalized(track.artistNames[0]))
+    );
+    const images = item?.album?.images || [];
+    const image = images.find((image: any) => image.width >= 160 && image.width <= 320) || images[0];
+    const url = image?.url ? new URL(image.url) : null;
+    const value = url?.protocol === "https:" && url.hostname === "i.scdn.co" && /^[a-zA-Z0-9]{22}$/.test(item?.id)
+      ? { imageUrl: url.href, spotifyUrl: `https://open.spotify.com/track/${item.id}` }
+      : null;
+    artworkCache.set(key, { value, until: Date.now() + (value ? 6 * 60 * 60_000 : 5 * 60_000) });
+    if (artworkCache.size > 500) artworkCache.delete(artworkCache.keys().next().value!);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export async function getRunArtwork(tracks: any[]) {
+  const unique = [...new Map(tracks.map(track => [artworkKey(track), track])).values()];
+  const entries: { key: string; imageUrl: string; spotifyUrl: string }[] = [];
+  let next = 0;
+  const deadline = Date.now() + 12_000;
+  await Promise.all(Array.from({ length: Math.min(4, unique.length) }, async () => {
+    while (next < unique.length && Date.now() < deadline) {
+      const track = unique[next++];
+      const art = await resolveArtwork(track);
+      if (art) entries.push({ key: artworkKey(track), ...art });
+    }
+  }));
+  return { version: 1, fetchedAt: new Date().toISOString(), complete: next >= unique.length, entries };
 }
 
 // Look up artists by name (no auth required beyond app credentials). Used for

@@ -177,6 +177,22 @@ export async function getActivity(sub: string, activityId: string) {
   return r.Item;
 }
 
+// Add a metrics/artwork cache without replacing the run, music, or description.
+export async function updateActivityPortfolio(
+  sub: string, activityId: string, patch: { stravaMetrics?: unknown; spotifyArtwork?: unknown },
+) {
+  const fields = Object.entries(patch).filter(([, value]) => value !== undefined);
+  if (!fields.length) return;
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.activities,
+    Key: { cognitoSub: sub, activityId },
+    ConditionExpression: "attribute_exists(cognitoSub) AND attribute_exists(activityId)",
+    UpdateExpression: "SET " + fields.map((_, i) => `#p${i} = :p${i}`).join(", "),
+    ExpressionAttributeNames: Object.fromEntries(fields.map(([key], i) => [`#p${i}`, key])),
+    ExpressionAttributeValues: Object.fromEntries(fields.map(([, value], i) => [`:p${i}`, value])),
+  }));
+}
+
 // Public, single-owner site: list every processed run across the table. The
 // app only ever has one athlete's data, so a full scan stays tiny and cheap.
 // Paginates so it keeps working even past a 1MB page.

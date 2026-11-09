@@ -3,6 +3,7 @@ import * as strava from "./strava";
 import * as spotify from "./spotify";
 import * as lastfm from "./lastfm";
 import { primaryCategoryForArtist, bucket, BreakdownItem } from "./genres";
+import { normalizeRunMetrics } from "./runMetrics";
 
 // URL prefix used to detect + strip a previously-written Stravify block when
 // re-publishing. The block itself is just the run URL + a one-line genre
@@ -104,6 +105,12 @@ export async function processActivity(
   const music = await fetchTracksAndGenres(user, startMs, endMs);
   if (!music) return { activityId, status: "no-music-source" };
 
+  // Save authoritative metrics even when a run had no music/GPS streams.
+  const activityZones = activity.has_heartrate
+    ? await strava.getActivityZones(stravaTokens.accessToken, activityId).catch(() => [])
+    : [];
+  const stravaMetrics = normalizeRunMetrics(activity, activityZones);
+
   if (music.tracks.length === 0) {
     await putActivity({
       cognitoSub: sub,
@@ -116,6 +123,7 @@ export async function processActivity(
       tracks: [],
       genreBreakdown: [],
       musicSource: music.source,
+      stravaMetrics,
       processedAt: new Date().toISOString(),
     });
     return { activityId, status: "no-tracks", source: music.source, trackCount: 0 };
@@ -156,6 +164,7 @@ export async function processActivity(
     genreBreakdown: breakdown,
     musicSource: music.source,
     streams,
+    stravaMetrics,
     processedAt: now,
     publishedAt,
     publishedUrl: publishedAt ? runUrl : undefined,
